@@ -1,5 +1,6 @@
 import carla
 import torch
+import torch.nn.functional as F
 import numpy as np
 
 class Agent:
@@ -28,10 +29,17 @@ class Agent:
         control.throttle = throttle
         control.steer = steer
         self.vehicle.apply_control(control)
-    
-    def action(self, observation):
-        action_values = self.model(observation)
-        action = torch.normlium(action_values)
+
+    def action(self, observation, temperature=1.0):
+        # モデルを評価モードに
+        self.model.policy_network.eval()
+        # 行動価値を計算
+        with torch.no_grad():
+            action_values = self.model.policy_network(observation)
+
+        # 確率に基づいて行動をサンプリング
+        probabilities = F.softmax(action_values / temperature, dim=1).squeeze(0)
+        action = torch.multinomial(probabilities, 1).item()
         return action
 
     def train(self, observations, actions, rewards, next_observations, dones):
