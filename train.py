@@ -11,7 +11,6 @@ metrics = {
     'batch_size': 64,           # バッチサイズ
     'episodes': 1000,           # エピソード数
     'steps_per_episode': 200,   # 各エピソードの最大ステップ数
-    'route_no':1,               # コース番号
 
     'gamma': 0.99,              # 割引率
     'tau': 0.005,               # ターゲットネットワーク更新の割合

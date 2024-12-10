@@ -11,7 +11,7 @@ class CarlaEnv:
 
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)
-        self.world = self.client.get_world()
+        self.world = self.client.load_world('Town02')
 
         # 設定
         self.resolution = resolution
@@ -46,19 +46,15 @@ class CarlaEnv:
     def _spawn_player(self):
         """プレイヤー車両をスポーン"""
         # 車両をrandomで選択
-        # blueprint_library = self.world.get_blueprint_library()
-        # vehicle_bp = random.choice(blueprint_library.filter('vehicle.*'))
         # priusで固定
-        vehicle_bp = 'vehicle.toyota.prius'
-        spawn_points = self.world.get_map().get_spawn_points()
-        spawn_point = random.choice(spawn_points)
+        vehicle_bp = self.world.get_blueprint_library().find('vehicle.toyota.prius')
+        topology = self.world.get_map().get_topology()[0]
+        spawn_point = topology[0].transform
+        self.destination = topology[1].transform
         self.player = self.world.try_spawn_actor(vehicle_bp, spawn_point)
         if self.player is None:
             raise RuntimeError("Failed to spawn player vehicle.")
         self.actor_list.append(self.player)
-
-        # 目的地を設定
-        self.destination = random.choice(spawn_points).location
         self.previous_distance = self._calculate_distance_to_destination()
 
     def _setup_collision_sensor(self):
