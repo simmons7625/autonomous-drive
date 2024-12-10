@@ -1,5 +1,4 @@
 import pandas as pd
-import torch
 from agent import Agent
 from carla_env import CarlaEnv
 from replay_buffer import ReplayBuffer
@@ -12,13 +11,14 @@ metrics = {
     'batch_size': 64,           # バッチサイズ
     'episodes': 1000,           # エピソード数
     'steps_per_episode': 200,   # 各エピソードの最大ステップ数
+    'route_no':1,               # コース番号
 
     'gamma': 0.99,              # 割引率
     'tau': 0.005,               # ターゲットネットワーク更新の割合
     'lr': 1e-3,                 # 学習率
     'input_dim': 10,            # 状態空間次元数（適宜設定）
     'hidden_dim': 128,          # 隠れ層ユニット数
-    'output_dim': 5             # 行動空間次元数（例: [throttle, steer_left, steer_right, brake, do_nothing]）
+    'output_dim': 2             # 行動空間次元数（例: [throttle, steer_left, steer_right, brake, do_nothing]）
 }
 
 # 記録用CSVを作成
@@ -52,21 +52,24 @@ def main(metrics):
         for step in range(metrics['steps_per_episode']):
             # ランダムな行動（後でモデルからの行動選択に切り替える
             if step <= metrics['capacity']:
-                action = np.random.choice(metrics['output_dim'])
+                throttle = np.random.choice(0, 1)
+                steer = np.random.choice(-1, 1)
+                brake = np.random.choice(0, 1)
             else:
-                action = agent.action(obs)
+                throttle, steer, brake = agent.action(obs)
 
             # 行動をエージェントで適用
-            agent.apply_control(throttle=0.5, steer=action * 0.1 - 0.2)
+            # throttle:0 ~ 1, steer = -1.0 ~ 1.0
+            agent.apply_control(throttle=throttle, steer=steer, brake=brake)
 
             # 環境の次の状態を取得
-            next_obs, reward, done, _ = env.step(action)
+            next_obs, reward, done, _ = env.step((throttle, steer, brake))
 
             # 報酬を蓄積
             total_reward += reward
 
             # リプレイバッファに保存
-            buffer.add(obs, action, reward, next_obs, done)
+            buffer.add(obs, (throttle, steer, brake), reward, next_obs, done)
 
             # 観測更新
             obs = next_obs
