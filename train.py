@@ -8,7 +8,7 @@ import torch
 # ハイパーパラメータを定義
 metrics = {
     'capacity': 10000,          # リプレイバッファの容量
-    'batch_size': 5,           # バッチサイズ
+    'batch_size': 1,           # バッチサイズ
     'episodes': 1000,           # エピソード数
     'steps_per_episode': 200,   # 各エピソードの最大ステップ数
 
@@ -30,9 +30,23 @@ def open_csv():
 
 # CSVに記録
 def log_metrics(episode, step, reward, actor_loss, critic_loss, df):
-    df = df.append({'Episode': episode, 'Step': step, 'Reward': reward, 'Actor Loss': actor_loss, 'Critic Loss': critic_loss}, ignore_index=True)
+    # 新しい行を辞書として作成
+    new_row = pd.DataFrame([{
+        'Episode': episode,
+        'Step': step,
+        'Reward': reward,
+        'Actor Loss': actor_loss,
+        'Critic Loss': critic_loss
+    }])
+
+    # DataFrameを結合
+    df = pd.concat([df, new_row], ignore_index=True)
+
+    # CSVファイルに保存
     df.to_csv('result/training_metrics.csv', index=False)
+
     return df
+
 
 def main(metrics):
     # デバイスの設定
@@ -72,7 +86,7 @@ def main(metrics):
             obs = next_obs
 
             # 学習
-            if len(buffer) >= metrics['batch_size']:
+            if len(buffer) >= metrics['capacity']:
                 batch = buffer.sample(metrics['batch_size'])
                 obs_batch, act_batch, rew_batch, next_obs_batch, done_batch = batch
 

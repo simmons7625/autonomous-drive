@@ -96,8 +96,12 @@ class CarlaEnv:
     def render(self):
         """pygameで画像を描画"""
         if self.rgb_image is not None:
-            surface = pygame.surfarray.make_surface(self.rgb_image.swapaxes(0, 1))
-            self.screen.blit(surface, (0, 0))
+            # 画像を1280x720にリサイズ
+            resized_image = pygame.transform.scale(
+                pygame.surfarray.make_surface(self.rgb_image.swapaxes(0, 1)),
+                (1280, 720)
+            )
+            self.screen.blit(resized_image, (0, 0))
         pygame.display.flip()
 
     def reset(self):
@@ -124,6 +128,8 @@ class CarlaEnv:
         self.previous_distance = current_distance
 
         reward, done = self._calculate_reward(distance_delta)
+        
+        self.render()
 
         return obs, reward, done, {}
 

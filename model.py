@@ -16,7 +16,6 @@ class AttentionNetwork(nn.Module):
         x = x.view(batch_size, height*width, -1)
         # Self-attention適用
         attn_output, _ = self.attention(x, x, x)  # [batch_size, num_patches, hidden_dim]
-        # print(attn_output.shape) #  (batch_size, 9216, 8)
         
         # 平均と分散を計算
         mean = self.fc2_mean(attn_output).mean(dim=1)
@@ -32,20 +31,21 @@ class Critic(nn.Module):
             nn.ReLU(),
             nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(256, 1)
+            nn.Linear(256, 1)  # 状態価値を出力
         )
 
     def forward(self, state):
-        x = torch.cat([state], dim=1)
-        return self.net(x)
+        return self.net(state)  # スカラー値（V(s)）を出力
+
 
 class SAC:
-    def __init__(self, state_dim, action_dim, hidden_dim, alpha, lr=1e-3, device='cuda'):
+    def __init__(self, state_dim, action_dim, hidden_dim, alpha, lr=1e-3, tau=0.005, device='cuda'):
         self.actor = AttentionNetwork(state_dim, hidden_dim, action_dim).to(device)
-        self.critic = Critic(state_dim).to(device)
+        self.critic = Critic(state_dim).to(device)  # Criticは状態価値を出力
         self.target_critic = Critic(state_dim).to(device)
 
-        self.alpha = alpha  # 温度パラメータ（スカラー値のまま）
+        self.alpha = alpha  # 温度パラメータ
+        self.tau = tau
         self.device = device
 
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
@@ -54,7 +54,7 @@ class SAC:
 
         # ターゲットネットワークの初期化
         self.update_target_network(1.0)
-
+    
     def sample_action(self, observation):
         """観測値から行動を選択"""
         # モデルを評価モードに
@@ -65,7 +65,7 @@ class SAC:
             # アクターモデルから行動をサンプリング
             mean, std = self.actor(observation)
             epsilon = torch.randn_like(mean, device=self.device)
-            action = torch.tanh(mean + std * epsilon) .squeeze(0)
+            action = torch.tanh(mean + std * epsilon).squeeze(0)
 
         throttle = action[0].item()
         steer = action[1].item()
@@ -77,32 +77,43 @@ class SAC:
             throttle = 0.0
 
         return throttle, steer, brake
-
+    
     def compute_actor_loss(self, states):
         """
         アクターモデルの損失を計算
         """
         mean, std = self.actor(states)
         epsilon = torch.randn_like(mean).to(self.device)
-        actions = torch.tanh(mean + std * epsilon)
+        actions = torch.tanh(mean + std * epsilon)  # 再パラメータ化トリック
 
-        # Q値を取得して損失を計算
-        q = self.critic(states)
-        actor_loss = (self.alpha - q).mean()  # log_probs を使用しない
+        # log_prob を計算
+        log_probs = -0.5 * (
+            ((actions - mean) / (std + 1e-6)) ** 2
+            + 2 * torch.log(std + 1e-6)
+            + torch.log(torch.tensor(2 * torch.pi).to(self.device))
+        )
+        log_probs = log_probs.sum(dim=-1)  # アクション次元で合計
+        log_probs -= torch.log(1 - actions.pow(2) + 1e-6).sum(dim=-1)  # tanh の補正
+
+        # 状態価値 V(s) を利用して損失を計算
+        v_values = self.critic(states)
+        actor_loss = (self.alpha * log_probs - v_values).mean()
 
         return actor_loss
 
-    def compute_critic_loss(self, states, actions, rewards, next_states, dones, gamma=0.99):
+
+    def compute_critic_loss(self, states, rewards, next_states, dones, gamma=0.99):
         """
-        クリティックモデルの損失を計算
+        状態価値関数の損失を計算
         """
-        print(states.shape, actions.shape, rewards.shape, next_states.shape, dones)
         with torch.no_grad():
-            next_q = self.target_critic(next_states)
-            target_q = rewards + (1 - dones) * gamma * next_q  # log_probs を使用しない
-        
-        q = self.critic(states)
-        critic_loss = self.loss_fn(q, target_q)
+            # 次状態の状態価値 V(s') を計算
+            next_v_values = self.target_critic(next_states)
+            target_v = rewards + (1 - dones) * gamma * next_v_values
+
+        # 現在の状態価値 V(s) を取得
+        v_values = self.critic(states)
+        critic_loss = self.loss_fn(v_values, target_v)
 
         return critic_loss
 
@@ -111,7 +122,7 @@ class SAC:
         モデルを更新
         """
         # Criticの更新
-        critic_loss = self.compute_critic_loss(states, actions, rewards, next_states, dones)
+        critic_loss = self.compute_critic_loss(states, rewards, next_states, dones)
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
@@ -133,18 +144,3 @@ class SAC:
         """
         for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
-
-    def save(self, path):
-        """
-        モデルを保存
-        """
-        torch.save(self.actor.state_dict(), path + "_actor.pth")
-        torch.save(self.critic.state_dict(), path + "_critic.pth")
-
-    def load(self, path):
-        """
-        モデルを読み込み
-        """
-        self.actor.load_state_dict(torch.load(path + "_actor.pth"))
-        self.critic.load_state_dict(torch.load(path + "_critic.pth"))
-        self.update_target_network(1.0)
