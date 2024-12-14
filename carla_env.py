@@ -4,9 +4,9 @@ import pygame
 import numpy as np
 
 class CarlaEnv:
-    def __init__(self, host='127.0.0.1', port=2000, resolution=(1280, 720), num_vehicles=10, num_pedestrians=10):
+    def __init__(self, host='127.0.0.1', port=2000, resolution=(128, 72), num_vehicles=50, num_pedestrians=50):
         pygame.init()
-        self.screen = pygame.display.set_mode(resolution)
+        self.screen = pygame.display.set_mode((1280, 720))
         pygame.display.set_caption("CARLA Environment")
 
         self.client = carla.Client(host, port)
@@ -48,12 +48,13 @@ class CarlaEnv:
         # 車両をrandomで選択
         # priusで固定
         vehicle_bp = self.world.get_blueprint_library().find('vehicle.toyota.prius')
-        topology = self.world.get_map().get_topology()[0]
-        spawn_point = topology[0].transform
-        self.destination = topology[1].transform
-        self.player = self.world.try_spawn_actor(vehicle_bp, spawn_point)
-        if self.player is None:
-            raise RuntimeError("Failed to spawn player vehicle.")
+        while self.player is None:
+            spawn_points = self.world.get_map().get_spawn_points()
+            spawn_point = random.choice(spawn_points)
+            spawn_point.rotation.roll = 0.0
+            spawn_point.rotation.pitch = 0.0
+            self.player = self.world.try_spawn_actor(vehicle_bp, spawn_point)
+        self.destination = random.choice(spawn_points).location
         self.actor_list.append(self.player)
         self.previous_distance = self._calculate_distance_to_destination()
 
@@ -63,8 +64,15 @@ class CarlaEnv:
         collision_bp = blueprint_library.find('sensor.other.collision')
         collision_sensor = self.world.spawn_actor(
             collision_bp, carla.Transform(), attach_to=self.player)
-        collision_sensor.listen(lambda event: self._on_collision(event))
+        
+        # コールバック関数を直接渡す
+        collision_sensor.listen(self._on_collision)
         self.actor_list.append(collision_sensor)
+
+    def _on_collision(self, event):
+        """衝突イベントの処理"""
+        self.collision_detected = True
+        print(f"Collision detected with {event.other_actor}")
 
     def _setup_rgb_camera(self):
         """RGBカメラを設定"""
@@ -78,10 +86,6 @@ class CarlaEnv:
             camera_bp, camera_transform, attach_to=self.player)
         rgb_camera.listen(lambda image: self._process_rgb_image(image))
         self.actor_list.append(rgb_camera)
-
-    def _on_collision(self, event):
-        """衝突イベントの処理"""
-        self.collision_detected = True
 
     def _process_rgb_image(self, image):
         """RGB画像を処理して保存"""
@@ -148,7 +152,7 @@ class CarlaEnv:
 
     def _get_observation(self):
         """観測を取得"""
-        return {'rgb': self.rgb_image}
+        return self.rgb_image
 
     def close(self):
         """環境を終了"""

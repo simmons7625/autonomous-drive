@@ -2,90 +2,149 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-
 class AttentionNetwork(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        """
-        Attentionベースのネットワーク構造
-        Args:
-            input_dim (int): 入力次元数
-            hidden_dim (int): 隠れ層の次元数
-            output_dim (int): 出力次元数（行動空間の次元数）
-        """
+    def __init__(self, input_dim, hidden_dim, output_dim, num_heads=1):
         super(AttentionNetwork, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=1, batch_first=True)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, batch_first=True)
+        self.fc2_mean = nn.Linear(hidden_dim, output_dim)  # 平均を出力
+        self.fc2_std = nn.Linear(hidden_dim, output_dim)  # 分散を出力
 
     def forward(self, x):
-        """
-        フォワードプロパゲーション
-        Args:
-            x (torch.Tensor): 入力テンソル（[batch_size, input_dim]）
-        Returns:
-            torch.Tensor: 行動価値（[batch_size, output_dim]）
-        """
-        x = torch.relu(self.fc1(x))  # 入力層
-        x = x.unsqueeze(1)  # Attentionのために次元を拡張（[batch_size, 1, hidden_dim]）
-        attn_output, _ = self.attention(x, x, x)  # Self-attention
-        attn_output = attn_output.squeeze(1)  # 元の次元に戻す
-        x = self.fc2(attn_output)  # 出力層
-        return x
+        x = torch.relu(self.fc1(x))
+        batch_size, height, width, channels = x.size()
+        x = x.view(batch_size, height*width, -1)
+        # Self-attention適用
+        attn_output, _ = self.attention(x, x, x)  # [batch_size, num_patches, hidden_dim]
+        # print(attn_output.shape) #  (batch_size, 9216, 8)
+        
+        # 平均と分散を計算
+        mean = self.fc2_mean(attn_output).mean(dim=1)
+        std = self.fc2_std(attn_output).mean(dim=1)
 
+        return mean, std
 
-class Attention_based_DQN:
-    def __init__(self, input_dim, hidden_dim, output_dim, lr=1e-3):
-        self.policy_network = AttentionNetwork(input_dim, hidden_dim, output_dim)
-        self.target_network = AttentionNetwork(input_dim, hidden_dim, output_dim)
-        self.optimizer = optim.Adam(self.policy_network.parameters(), lr=lr)
+class Critic(nn.Module):
+    def __init__(self, state_dim):
+        super(Critic, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+
+    def forward(self, state):
+        x = torch.cat([state], dim=1)
+        return self.net(x)
+
+class SAC:
+    def __init__(self, state_dim, action_dim, hidden_dim, alpha, lr=1e-3, device='cuda'):
+        self.actor = AttentionNetwork(state_dim, hidden_dim, action_dim).to(device)
+        self.critic = Critic(state_dim).to(device)
+        self.target_critic = Critic(state_dim).to(device)
+
+        self.alpha = alpha  # 温度パラメータ（スカラー値のまま）
+        self.device = device
+
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
         self.loss_fn = nn.MSELoss()
 
-        # ターゲットネットワークを初期化
+        # ターゲットネットワークの初期化
         self.update_target_network(1.0)
 
-    def predict(self, state):
-        """
-        行動価値を予測
-        Args:
-            state (torch.Tensor): 状態（[batch_size, input_dim]）
-        Returns:
-            torch.Tensor: 行動価値（[batch_size, output_dim]）
-        """
+    def sample_action(self, observation):
+        """観測値から行動を選択"""
+        # モデルを評価モードに
+        self.actor.eval()
         with torch.no_grad():
-            return self.policy_network(state)
+            # 観測値をGPUに移動
+            observation = observation.to(self.device)
+            # アクターモデルから行動をサンプリング
+            mean, std = self.actor(observation)
+            epsilon = torch.randn_like(mean, device=self.device)
+            action = torch.tanh(mean + std * epsilon) .squeeze(0)
 
-    def train(self, states, actions, targets):
+        throttle = action[0].item()
+        steer = action[1].item()
+        brake = 0.0  # 必要に応じて追加
+
+        # throttle < 0 はbrakeとして処理
+        if throttle < 0:
+            brake = abs(throttle)
+            throttle = 0.0
+
+        return throttle, steer, brake
+
+    def compute_actor_loss(self, states):
         """
-        モデルを訓練
-        Args:
-            states (torch.Tensor): 状態（[batch_size, input_dim]）
-            actions (torch.Tensor): 行動（[batch_size]）
-            targets (torch.Tensor): ターゲット値（[batch_size]）
-        Returns:
-            float: 損失値
+        アクターモデルの損失を計算
         """
-        self.optimizer.zero_grad()
-        q_values = self.policy_network(states)  # 行動価値を予測
-        action_q_values = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)  # 選択した行動の価値
-        loss = self.loss_fn(action_q_values, targets)  # 損失を計算
-        loss.backward()
-        self.optimizer.step()
-        return loss.item()
+        mean, std = self.actor(states)
+        epsilon = torch.randn_like(mean).to(self.device)
+        actions = torch.tanh(mean + std * epsilon)
+
+        # Q値を取得して損失を計算
+        q = self.critic(states)
+        actor_loss = (self.alpha - q).mean()  # log_probs を使用しない
+
+        return actor_loss
+
+    def compute_critic_loss(self, states, actions, rewards, next_states, dones, gamma=0.99):
+        """
+        クリティックモデルの損失を計算
+        """
+        print(states.shape, actions.shape, rewards.shape, next_states.shape, dones)
+        with torch.no_grad():
+            next_q = self.target_critic(next_states)
+            target_q = rewards + (1 - dones) * gamma * next_q  # log_probs を使用しない
+        
+        q = self.critic(states)
+        critic_loss = self.loss_fn(q, target_q)
+
+        return critic_loss
+
+    def update(self, states, actions, rewards, next_states, dones):
+        """
+        モデルを更新
+        """
+        # Criticの更新
+        critic_loss = self.compute_critic_loss(states, actions, rewards, next_states, dones)
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        # Actorの更新
+        actor_loss = self.compute_actor_loss(states)
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+
+        # ターゲットネットワークのソフト更新
+        self.update_target_network(self.tau)
+
+        return actor_loss.item(), critic_loss.item()
 
     def update_target_network(self, tau):
         """
-        ターゲットネットワークのパラメータを更新
-        Args:
-            tau (float): ソフト更新の割合（1.0でハード更新）
+        ターゲットネットワークのパラメータをソフト更新
         """
-        for target_param, policy_param in zip(self.target_network.parameters(), self.policy_network.parameters()):
-            target_param.data.copy_(tau * policy_param.data + (1.0 - tau) * target_param.data)
+        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
 
     def save(self, path):
-        """ネットワークの状態を保存"""
-        torch.save(self.policy_network.state_dict(), path)
+        """
+        モデルを保存
+        """
+        torch.save(self.actor.state_dict(), path + "_actor.pth")
+        torch.save(self.critic.state_dict(), path + "_critic.pth")
 
     def load(self, path):
-        """ネットワークの状態を読み込む"""
-        self.policy_network.load_state_dict(torch.load(path))
+        """
+        モデルを読み込み
+        """
+        self.actor.load_state_dict(torch.load(path + "_actor.pth"))
+        self.critic.load_state_dict(torch.load(path + "_critic.pth"))
         self.update_target_network(1.0)

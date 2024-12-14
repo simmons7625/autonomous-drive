@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 
 class Agent:
-    def __init__(self, vehicle, model, replay_buffer, batch_size=64, gamma=0.99, tau=0.001):
+    def __init__(self, vehicle, model, replay_buffer, batch_size=16, gamma=0.99, tau=0.001, device='cuda'):
         """
         Agentクラスの初期化
 
@@ -15,6 +15,7 @@ class Agent:
             batch_size (int): 学習時のバッチサイズ
             gamma (float): 割引率
             tau (float): ターゲットネットワークのソフト更新パラメータ
+            device (str): 使用するデバイス（'cuda' または 'cpu'）
         """
         self.vehicle = vehicle
         self.model = model
@@ -22,32 +23,53 @@ class Agent:
         self.batch_size = batch_size
         self.gamma = gamma
         self.tau = tau
+        self.device = torch.device(device)
 
-    def apply_control(self, throttle=0.5, steer=0.0):
+    def apply_control(self, throttle=0.5, steer=0.0, brake=0.0):
         """車両の制御を適用"""
         control = carla.VehicleControl()
         control.throttle = throttle
         control.steer = steer
+        control.brake = brake
         self.vehicle.apply_control(control)
 
-    def action(self, observation, temperature=1.0):
+    def action(self, observation):
+        """観測値から行動を選択"""
         # モデルを評価モードに
-        self.model.policy_network.eval()
-        # 行動価値を計算
+        self.model.actor.eval()
         with torch.no_grad():
-            action_values = self.model.policy_network(observation)
+            # 観測値をGPUに移動
+            observation = observation.to(self.device)
+            # アクターモデルから行動をサンプリング
+            mean, log_std = self.model.actor(observation)
+            std = torch.exp(log_std)
+            epsilon = torch.randn_like(mean, device=self.device)
+            action = torch.tanh(mean + std * epsilon)  # 再パラメータ化トリック
 
-        # 確率に基づいて行動をサンプリング
-        probabilities = F.softmax(action_values / temperature, dim=1).squeeze(0)
-        action = torch.multinomial(probabilities, 1).item()
-        return action
+        throttle = action[0].item()
+        steer = action[1].item()
+        brake = 0.0  # 必要に応じて追加
+
+        # throttle < 0 はbrakeとして処理
+        if throttle < 0:
+            brake = abs(throttle)
+            throttle = 0.0
+
+        return throttle, steer, brake
 
     def train(self, observations, actions, rewards, next_observations, dones):
-        target_q_values = self.model.target_network.predict(next_observations)
-        max_target_q_values = np.max(target_q_values, axis=1)
-        targets = rewards + self.gamma * max_target_q_values * (1 - dones)
-        loss = self.model.train(observations, actions, targets)
-        return loss
+        """モデルを訓練"""
+        # テンソルに変換してGPUに移動
+        observations = torch.tensor(observations, dtype=torch.float32, device=self.device)
+        actions = torch.tensor(actions, dtype=torch.float32, device=self.device)
+        rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+        next_observations = torch.tensor(next_observations, dtype=torch.float32, device=self.device)
+        dones = torch.tensor(dones, dtype=torch.float32, device=self.device)
+
+        # モデルを更新
+        actor_loss, critic_loss = self.model.update(observations, actions, rewards, next_observations, dones)
+
+        return {"actor_loss": actor_loss, "critic_loss": critic_loss}
 
     def soft_update_target_network(self):
         self.model.update_target_network(tau=self.tau)
@@ -63,4 +85,3 @@ class Agent:
     def cleanup(self):
         """車両リソースを解放"""
         self.vehicle.destroy()
-
