@@ -9,8 +9,8 @@ import torch
 metrics = {
     'capacity': 10000,          # リプレイバッファの容量
     'batch_size': 1,           # バッチサイズ
-    'episodes': 1000,           # エピソード数
-    'steps_per_episode': 200,   # 各エピソードの最大ステップ数
+    'episodes': 10000,           # エピソード数
+    'steps_per_episode': 1000,   # 各エピソードの最大ステップ数
 
     'gamma': 0.99,              # 割引率
     'tau': 0.001,               # ターゲットネットワーク更新の割合
@@ -46,7 +46,6 @@ def log_metrics(episode, step, reward, actor_loss, critic_loss, df):
     df.to_csv('result/training_metrics.csv', index=False)
 
     return df
-
 
 def main(metrics):
     # デバイスの設定
@@ -102,13 +101,12 @@ def main(metrics):
 
             if done:
                 break
+            env.close()
 
         # エピソードの結果をログ
         df = log_metrics(episode, step, total_reward, actor_loss, critic_loss, df)
         print(f"Episode {episode + 1}/{metrics['episodes']}, Total Reward: {total_reward}, Actor Loss: {actor_loss}, Critic Loss: {critic_loss}")
 
-    # 環境を終了
-    env.close()
     print("Training completed.")
 
 if __name__ == "__main__":

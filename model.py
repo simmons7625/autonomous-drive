@@ -3,25 +3,39 @@ import torch.nn as nn
 import torch.optim as optim
 
 class AttentionNetwork(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_heads=1):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_heads=1, pool_size=(2, 2)):
         super(AttentionNetwork, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.pool = nn.AdaptiveAvgPool2d(pool_size)  # プーリング処理
         self.attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, batch_first=True)
         self.fc2_mean = nn.Linear(hidden_dim, output_dim)  # 平均を出力
         self.fc2_std = nn.Linear(hidden_dim, output_dim)  # 分散を出力
 
     def forward(self, x):
-        x = torch.relu(self.fc1(x))
+        # 入力の次元: [batch_size, height, width, channels]
         batch_size, height, width, channels = x.size()
-        x = x.view(batch_size, height*width, -1)
-        # Self-attention適用
+
+        # プーリング処理で空間次元を縮小 (height, width -> pool_size)
+        x = x.permute(0, 3, 1, 2)  # (B, C, H, W) に変換
+        x = self.pool(x)  # Adaptive Average Pooling 適用
+        x = x.permute(0, 2, 3, 1)  # (B, H', W', C) に戻す
+
+        # 次元縮小後の情報取得
+        _, pooled_height, pooled_width, _ = x.size()
+
+        # 線形変換と活性化関数
+        x = torch.relu(self.fc1(x))
+
+        # Self-attention 用に [batch_size, num_patches, hidden_dim] へ変換
+        x = x.view(batch_size, pooled_height * pooled_width, -1)
         attn_output, _ = self.attention(x, x, x)  # [batch_size, num_patches, hidden_dim]
-        
+
         # 平均と分散を計算
         mean = self.fc2_mean(attn_output).mean(dim=1)
         std = self.fc2_std(attn_output).mean(dim=1)
 
         return mean, std
+
 
 class Critic(nn.Module):
     def __init__(self, state_dim):
